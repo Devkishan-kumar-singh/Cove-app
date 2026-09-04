@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#080b18"><title>Create your Cove</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet"><link rel="stylesheet" href="style.css"></head>
+<body class="auth-page"><div class="auth-orb orb-a"></div><div class="auth-orb orb-b"></div>
+<a class="brand auth-brand" href="index.html"><span class="brand-mark"><span></span><span></span><span></span></span>Cove</a>
+<main class="auth-shell register-shell">
+  <section class="auth-aside"><span class="aside-kicker">Start your private space</span><h1>Good ideas grow<br>when they’re <em>shared.</em></h1><p>Create your profile, find your people, and give every conversation a place to belong.</p><div class="aside-preview"><div class="preview-bubble">One place for the whole project?</div><div class="preview-bubble mine">Exactly. I’ll make the circle ✨</div><div class="mini-people"><span>KS</span><span>PS</span><span>AR</span><p><b>Private by default</b><small>Only the people you invite</small></p></div></div></section>
+  <section class="auth-card"><div class="card-heading"><span class="step">01 — YOUR PROFILE</span><h2>Create your account</h2><p>Already have a Cove? <a href="login.html">Log in</a></p></div>
+    <form id="regForm" novalidate>
+      <div class="form-grid">
+        <div class="field"><label for="name">Full name</label><div class="input-wrap"><span>◇</span><input type="text" id="name" placeholder="Kishan Singh" autocomplete="name"></div><span class="error" id="nameError"></span></div>
+        <div class="field"><label for="username">Username</label><div class="input-wrap"><span>@</span><input type="text" id="username" placeholder="kishan_singh" autocomplete="username"></div><span class="error" id="usernameError"></span></div>
+        <div class="field full"><label for="email">Email address</label><div class="input-wrap"><span>✉</span><input type="email" id="email" placeholder="you@example.com" autocomplete="email"></div><span class="error" id="emailError"></span></div>
+        <div class="field full"><label for="password">Password</label><div class="input-wrap"><span>⌑</span><input type="password" id="password" placeholder="At least 6 characters" autocomplete="new-password"><button class="reveal-password" type="button" aria-label="Show password">Show</button></div><span class="error" id="passwordError"></span></div>
+      </div>
+      <fieldset><legend>Gender</legend><div class="choice-row"><label class="choice"><input type="radio" name="gender" value="male" id="genderMale"><span>Male</span></label><label class="choice"><input type="radio" name="gender" value="female" id="genderFemale"><span>Female</span></label></div><span class="error" id="genderError"></span></fieldset>
+      <fieldset><legend>Skills you’re building</legend><div class="choice-row"><label class="choice"><input type="checkbox" name="skills" value="HTML"><span>HTML</span></label><label class="choice"><input type="checkbox" name="skills" value="CSS"><span>CSS</span></label><label class="choice"><input type="checkbox" name="skills" value="javascript"><span>JavaScript</span></label></div><span class="error" id="skillsError"></span></fieldset>
+      <div class="field"><label for="country">Country</label><div class="input-wrap"><span>⌖</span><select id="country"><option value="">Select your country</option><option>india</option><option>pakistan</option><option>nepal</option><option>sri lanka</option><option>bangladesh</option></select></div><span class="error" id="countryError"></span></div>
+      <div class="field"><label for="message">A quick introduction</label><div class="input-wrap textarea"><textarea rows="3" id="message" placeholder="What are you learning or working on?"></textarea></div><span class="error" id="messageError"></span></div>
+      <div id="formSuccess" class="success-msg" role="status"></div>
+      <div class="form-actions"><button type="submit" id="submitBtn"><span class="btn-text">Create account</span><span class="btn-spinner" hidden></span><i>→</i></button><button class="reset-btn" type="reset">Reset</button></div>
+      <p class="form-note">By continuing, you agree to use Cove respectfully.</p>
+    </form>
+  </section>
+</main><script src="auth-ui.js" defer></script><script src="script.js" defer></script></body></html>
