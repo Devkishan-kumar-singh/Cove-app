@@ -8,6 +8,7 @@ Cove is a private real-time chat app with direct messages, admin-managed circles
 - Private DMs and member-only circles
 - Creator/admin-only invitations and removals
 - Live online count and per-member online status
+- Private WebRTC voice calls in direct chats and circles, with mute and participant presence
 - Socket.IO real-time messages and presence
 - Firebase-backed users, rooms, memberships, and history
 - Optional attachments (15 MB limit)
@@ -77,3 +78,5 @@ Open `http://localhost:3000`. Firestore collections are created automatically as
 - `rooms/{roomId}/messages/{messageId}`: text or attachment messages
 
 The server checks membership before returning history, accepting uploads, joining a Socket.IO room, or saving messages. It checks creator ownership before adding or removing circle members.
+
+Voice calls use Socket.IO only for membership-checked signalling; audio travels peer-to-peer through WebRTC. Calls require HTTPS in production (Render supplies this) and microphone permission. The included public STUN servers work for most networks. Some restrictive corporate or carrier networks require a TURN relay for guaranteed connectivity. Background browser tabs can remain in a call, but a sleeping computer suspends its microphone and network connection.

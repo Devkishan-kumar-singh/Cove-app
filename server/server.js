@@ -403,6 +403,7 @@ app.delete("/api/circles/:id/members/:username", requireAuth, async (req, res) =
         const memberSocket = io.sockets.sockets.get(socketId);
         if (!memberSocket) continue;
         memberSocket.emit("member_removed", { roomId, email: user.email, username: user.username });
+        if (socketCallRoom.get(socketId) === String(roomId)) await leaveVoiceCall(memberSocket);
         memberSocket.leave(`room:${roomId}`);
         joinedRooms.get(socketId)?.delete(String(roomId));
     }
@@ -459,6 +460,35 @@ app.post("/api/rooms/:id/upload", requireAuth, upload.single("file"), async (req
 const socketEmail = new Map();
 const emailSockets = new Map();
 const joinedRooms = new Map();
+const activeCalls = new Map(); // roomId -> Map(socketId, email)
+const socketCallRoom = new Map();
+
+async function emitCallState(roomId) {
+    const id = String(roomId);
+    const participants = activeCalls.get(id) || new Map();
+    const members = await store.getRoomMembers(id);
+    const payload = {
+        roomId: id,
+        active: participants.size > 0,
+        participantCount: participants.size,
+        participantEmails: Array.from(new Set(participants.values())),
+    };
+    members.forEach((member) => {
+        for (const socketId of emailSockets.get(member.email) || []) io.to(socketId).emit("call_state", payload);
+    });
+}
+
+async function leaveVoiceCall(socket) {
+    const roomId = socketCallRoom.get(socket.id);
+    if (!roomId) return;
+    const participants = activeCalls.get(roomId);
+    participants?.delete(socket.id);
+    socketCallRoom.delete(socket.id);
+    socket.leave(`call:${roomId}`);
+    socket.to(`call:${roomId}`).emit("call_user_left", { socketId: socket.id });
+    if (!participants?.size) activeCalls.delete(roomId);
+    await emitCallState(roomId);
+}
 
 async function emitRoomPresence(roomId) {
     try {
@@ -475,7 +505,7 @@ async function emitRoomPresence(roomId) {
 }
 
 io.on("connection", (socket) => {
-    socket.on("auth", (token) => {
+    socket.on("auth", async (token) => {
         const email = sessions.get(token);
         if (!email) return socket.emit("auth_error", "Invalid session.");
         socketEmail.set(socket.id, email);
@@ -483,6 +513,9 @@ io.on("connection", (socket) => {
         emailSockets.get(email).add(socket.id);
         joinedRooms.set(socket.id, new Set());
         socket.emit("auth_ok");
+        for (const roomId of activeCalls.keys()) {
+            if (await store.isRoomMember(roomId, email)) await emitCallState(roomId);
+        }
     });
 
     socket.on("join_room", async (roomId) => {
@@ -504,7 +537,32 @@ io.on("connection", (socket) => {
         io.to(`room:${roomId}`).emit("new_message", saved);
     });
 
+    socket.on("call_join", async (roomId) => {
+        const email = socketEmail.get(socket.id);
+        const id = String(roomId);
+        if (!email || !(await store.isRoomMember(id, email))) return socket.emit("call_error", "You cannot join this call.");
+        if (socketCallRoom.has(socket.id)) await leaveVoiceCall(socket);
+        if (!activeCalls.has(id)) activeCalls.set(id, new Map());
+        const participants = activeCalls.get(id);
+        const existing = Array.from(participants, ([socketId, participantEmail]) => ({ socketId, email: participantEmail }));
+        participants.set(socket.id, email);
+        socketCallRoom.set(socket.id, id);
+        socket.join(`call:${id}`);
+        socket.emit("call_participants", { roomId: id, participants: existing });
+        socket.to(`call:${id}`).emit("call_user_joined", { roomId: id, socketId: socket.id, email });
+        await emitCallState(id);
+    });
+
+    socket.on("call_signal", async ({ to, roomId, signal }) => {
+        const id = String(roomId);
+        if (socketCallRoom.get(socket.id) !== id || socketCallRoom.get(to) !== id) return;
+        io.to(to).emit("call_signal", { roomId: id, from: socket.id, email: socketEmail.get(socket.id), signal });
+    });
+
+    socket.on("call_leave", () => leaveVoiceCall(socket));
+
     socket.on("disconnect", () => {
+        leaveVoiceCall(socket);
         const email = socketEmail.get(socket.id);
         const roomsToUpdate = Array.from(joinedRooms.get(socket.id) || []);
         if (email && emailSockets.has(email)) {

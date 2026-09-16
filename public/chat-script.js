@@ -84,6 +84,11 @@ let activeRoom = null;
 let socket = null;
 let activeRoomIsOwner = false;
 let currentOnlineEmails = new Set();
+let localCallStream = null;
+let activeCallRoomId = null;
+let callMuted = false;
+const callPeers = new Map();
+const knownCallStates = new Map();
 
 const EMOJI_SET = [
     "😀","😁","😂","🤣","😊","😍","😘","😎","🤔","😅",
@@ -115,6 +120,7 @@ async function init() {
         meName.textContent = me.name;
         meUsername.textContent = `@${me.username}`;
         meAvatar.textContent = initials(me.name || me.username);
+        installVoiceCallUi();
         connectSocket();
         loadRooms();
         buildEmojiPicker();
@@ -201,6 +207,22 @@ function connectSocket() {
         onlineCount.classList.toggle("is-online", count > (activeRoom?.type === "circle" ? 0 : 1));
         if (activeRoom?.type === "circle" && !membersModalOverlay.hidden) loadMembers();
     });
+
+    socket.on("call_state", (state) => {
+        knownCallStates.set(String(state.roomId), state);
+        updateCallButton();
+        if (String(state.roomId) === String(activeCallRoomId)) updateVoiceDock(state);
+    });
+    socket.on("call_participants", async ({ roomId, participants }) => {
+        if (String(roomId) !== String(activeCallRoomId)) return;
+        for (const participant of participants) await createCallPeer(participant.socketId, true);
+    });
+    socket.on("call_user_joined", ({ roomId }) => {
+        if (String(roomId) === String(activeCallRoomId)) showToast("Someone joined the voice call.", "success");
+    });
+    socket.on("call_user_left", ({ socketId }) => removeCallPeer(socketId));
+    socket.on("call_signal", handleCallSignal);
+    socket.on("call_error", (message) => { showToast(message || "Could not join the call.", "error"); endVoiceCall(); });
 }
 
 // =========================================
@@ -422,6 +444,7 @@ async function openRoom(room) {
     activeRoomIsOwner = false;
     currentOnlineEmails = new Set();
     onlineCount.querySelector("b").textContent = "Checking online…";
+    updateCallButton();
 
     threadEmpty.hidden = true;
     threadActive.hidden = false;
@@ -458,6 +481,140 @@ async function openRoom(room) {
     } catch (err) { console.error(err); if (messageLoader) messageLoader.hidden = true; showToast("Could not load messages.", "error"); }
 
     loadRooms();
+}
+
+// =========================================
+// PRIVATE VOICE CALLS — WebRTC mesh + Socket.IO signalling
+// =========================================
+
+function installVoiceCallUi() {
+    if (document.getElementById("voiceCallBtn")) return;
+    const button = document.createElement("button");
+    button.id = "voiceCallBtn";
+    button.className = "voice-call-btn";
+    button.type = "button";
+    button.innerHTML = `<span class="voice-call-icon">◖</span><b>Voice call</b><i hidden></i>`;
+    button.addEventListener("click", () => activeCallRoomId ? endVoiceCall() : startVoiceCall());
+    onlineCount.insertAdjacentElement("afterend", button);
+
+    document.body.insertAdjacentHTML("beforeend", `
+        <section class="voice-dock" id="voiceDock" hidden aria-live="polite">
+            <div class="voice-dock-pulse"><span></span><span></span><b>◖</b></div>
+            <div class="voice-dock-copy"><small>VOICE ROOM</small><strong id="voiceDockName">Conversation</strong><span id="voiceDockStatus">Connecting…</span></div>
+            <div class="voice-people" id="voicePeople"></div>
+            <button type="button" class="voice-control" id="voiceMuteBtn" title="Mute microphone">♩</button>
+            <button type="button" class="voice-control voice-end" id="voiceEndBtn" title="Leave call">×</button>
+        </section>`);
+    document.getElementById("voiceMuteBtn").addEventListener("click", toggleCallMute);
+    document.getElementById("voiceEndBtn").addEventListener("click", endVoiceCall);
+}
+
+async function startVoiceCall() {
+    if (!activeRoomId || !socket) return;
+    if (!navigator.mediaDevices?.getUserMedia) return showToast("Voice calls are not supported in this browser.", "error");
+    try {
+        localCallStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
+        activeCallRoomId = String(activeRoomId);
+        callMuted = false;
+        const dock = document.getElementById("voiceDock");
+        dock.hidden = false;
+        document.getElementById("voiceDockName").textContent = activeRoom?.type === "circle" ? activeRoom.name : (activeRoom?.otherUser?.name || "Private call");
+        document.getElementById("voiceDockStatus").textContent = "Connecting securely…";
+        socket.emit("call_join", activeCallRoomId);
+        updateCallButton();
+    } catch (error) {
+        showToast(error.name === "NotAllowedError" ? "Microphone permission is required for voice calls." : "Could not access your microphone.", "error");
+    }
+}
+
+function createPeerConnection(peerId) {
+    if (callPeers.has(peerId)) return callPeers.get(peerId);
+    const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }, { urls: "stun:stun1.l.google.com:19302" }] });
+    localCallStream?.getTracks().forEach((track) => peer.addTrack(track, localCallStream));
+    peer.onicecandidate = ({ candidate }) => {
+        if (candidate) socket.emit("call_signal", { to: peerId, roomId: activeCallRoomId, signal: { candidate } });
+    };
+    peer.ontrack = ({ streams }) => {
+        let audio = document.getElementById(`call-audio-${peerId}`);
+        if (!audio) { audio = document.createElement("audio"); audio.id = `call-audio-${peerId}`; audio.autoplay = true; audio.playsInline = true; document.body.appendChild(audio); }
+        audio.srcObject = streams[0];
+    };
+    peer.onconnectionstatechange = () => {
+        if (["failed", "closed", "disconnected"].includes(peer.connectionState)) removeCallPeer(peerId);
+    };
+    callPeers.set(peerId, peer);
+    return peer;
+}
+
+async function createCallPeer(peerId, makeOffer = false) {
+    const peer = createPeerConnection(peerId);
+    if (makeOffer) {
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        socket.emit("call_signal", { to: peerId, roomId: activeCallRoomId, signal: { description: peer.localDescription } });
+    }
+    return peer;
+}
+
+async function handleCallSignal({ roomId, from, signal }) {
+    if (String(roomId) !== String(activeCallRoomId)) return;
+    try {
+        const peer = await createCallPeer(from);
+        if (signal.description) {
+            await peer.setRemoteDescription(signal.description);
+            if (signal.description.type === "offer") {
+                const answer = await peer.createAnswer();
+                await peer.setLocalDescription(answer);
+                socket.emit("call_signal", { to: from, roomId: activeCallRoomId, signal: { description: peer.localDescription } });
+            }
+        } else if (signal.candidate) await peer.addIceCandidate(signal.candidate);
+    } catch (error) { console.error("Voice call signal error:", error); }
+}
+
+function removeCallPeer(peerId) {
+    callPeers.get(peerId)?.close();
+    callPeers.delete(peerId);
+    document.getElementById(`call-audio-${peerId}`)?.remove();
+}
+
+function toggleCallMute() {
+    callMuted = !callMuted;
+    localCallStream?.getAudioTracks().forEach((track) => { track.enabled = !callMuted; });
+    const button = document.getElementById("voiceMuteBtn");
+    button.classList.toggle("muted", callMuted);
+    button.textContent = callMuted ? "M" : "♩";
+    button.title = callMuted ? "Unmute microphone" : "Mute microphone";
+}
+
+function endVoiceCall() {
+    if (activeCallRoomId && socket) socket.emit("call_leave");
+    callPeers.forEach((_, peerId) => removeCallPeer(peerId));
+    localCallStream?.getTracks().forEach((track) => track.stop());
+    localCallStream = null;
+    activeCallRoomId = null;
+    callMuted = false;
+    const dock = document.getElementById("voiceDock");
+    if (dock) dock.hidden = true;
+    updateCallButton();
+}
+
+function updateCallButton() {
+    const button = document.getElementById("voiceCallBtn");
+    if (!button) return;
+    const state = knownCallStates.get(String(activeRoomId));
+    const inThisCall = String(activeCallRoomId) === String(activeRoomId);
+    button.classList.toggle("active", inThisCall);
+    button.classList.toggle("has-call", !inThisCall && !!state?.active);
+    button.querySelector("b").textContent = inThisCall ? "Leave call" : state?.active ? `Join call · ${state.participantCount}` : "Voice call";
+    const badge = button.querySelector("i");
+    badge.hidden = !state?.active;
+}
+
+function updateVoiceDock(state) {
+    const status = document.getElementById("voiceDockStatus");
+    if (status) status.textContent = `${state.participantCount} ${state.participantCount === 1 ? "person" : "people"} connected`;
+    const people = document.getElementById("voicePeople");
+    if (people) people.innerHTML = (state.participantEmails || []).slice(0, 4).map((email) => `<span title="${escapeHtml(email)}">${initials(email.split("@")[0])}</span>`).join("");
 }
 
 function renderRoomIntro(room) {
@@ -825,6 +982,9 @@ document.addEventListener("keydown", (event) => {
         document.querySelectorAll(".modal-overlay:not([hidden])").forEach((overlay) => (overlay.hidden = true));
         emojiPicker.hidden = true;
     }
+});
+window.addEventListener("beforeunload", () => {
+    localCallStream?.getTracks().forEach((track) => track.stop());
 });
 
 init();
