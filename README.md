@@ -1,88 +1,79 @@
 # Cove
 
-Cove is a private, real-time space for direct messages and small group circles. It combines live chat, member-only rooms, email OTP verification, and Supabase-backed file sharing in a responsive glassmorphism interface.
+Cove is a private real-time chat app with direct messages, admin-managed circles, presence, password login, and Resend email OTP login. The backend uses Firebase Firestore and optional Firebase Storage; no Supabase configuration is required.
 
-## Highlights
+## Included
 
-- Real-time direct messages and private circles with Socket.IO
-- Email/password login plus passwordless OTP login
-- Email verification for new accounts through Resend
-- Username search and live availability checks
-- Invite-only circle membership and member directory
-- Image, PDF, document, text, and ZIP sharing (15 MB limit)
-- Shared images and links library for every conversation
-- Live online-member count inside open conversations
-- Owner-only member removal for private circles
-- Drag-and-drop uploads, emoji picker, keyboard shortcuts, toast feedback
-- Responsive mobile chat navigation
-- Reduced-motion support and accessible control labels
-- Supabase PostgreSQL and Storage integration
-- Render-ready Express server
+- Email/password and passwordless 6-digit OTP login through Resend
+- Private DMs and member-only circles
+- Creator/admin-only invitations and removals
+- Live online count and per-member online status
+- Socket.IO real-time messages and presence
+- Firebase-backed users, rooms, memberships, and history
+- Optional attachments (15 MB limit)
+- Responsive, high-contrast social chat interface
 
-## Project structure
+## Firebase setup (Spark/free tier)
 
-\`\`\`text
-cove-app/
-├── public/                 # Landing, authentication, chat UI and client scripts
-├── server/
-│   ├── db.js               # PostgreSQL queries and schema initialization
-│   ├── server.js           # Express API and Socket.IO server
-│   └── storage.js          # Supabase Storage uploads
-├── .env.example
-├── package.json
-└── README.md
-\`\`\`
+1. Create a project in the [Firebase Console](https://console.firebase.google.com/).
+2. Under **Build → Firestore Database**, create a database in a nearby region using **Production mode**.
+3. Open **Project settings → Service accounts → Generate new private key**. Keep this JSON secret; never put it in `public/` or commit it.
+4. Encode the JSON as one base64 line in PowerShell:
+
+   ```powershell
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\service-account.json"))
+   ```
+
+5. Copy `.env.example` to `.env` and paste that value into `FIREBASE_SERVICE_ACCOUNT_BASE64`.
+6. Publish `firestore.rules` in Firestore's **Rules** tab. Browser access is denied because the Express API performs authentication and membership checks.
+7. Optional attachments: upgrade the project to Blaze, create a bucket under **Build → Storage**, put its exact name in `FIREBASE_STORAGE_BUCKET`, and publish `storage.rules`.
+
+As of February 3, 2026, Firebase requires the Blaze plan and a billing account for all Cloud Storage access. Eligible US bucket regions still have an Always Free allowance, but this is not the Spark plan. If you want a strictly no-card Spark setup, leave `FIREBASE_STORAGE_BUCKET` empty: Firestore chat, login, circles, and presence still work, but file uploads do not. A Firebase web API key is not needed because Firebase is accessed only by the server.
+
+## Resend OTP setup
+
+1. Create a [Resend](https://resend.com/) API key.
+2. For real users, add and verify your sending domain. The onboarding sender is normally limited to testing with your own account email.
+3. Set `RESEND_API_KEY` and an approved sender such as `Cove <login@example.com>` in `EMAIL_FROM`.
+4. Registration sends an OTP and creates the user only after verification. Existing users may sign in with password or Resend OTP.
+
+Codes expire after five minutes and allow five attempts. Pending OTPs and sessions live in server memory, so a restart signs users out. Run one server instance unless these are later moved to a shared store.
 
 ## Run locally
 
-1. Install Node.js 18 or newer.
-2. Install packages:
+```bash
+npm install
+npm start
+```
 
-   \`\`\`bash
-   npm install
-   \`\`\`
+Open `http://localhost:3000`. Firestore collections are created automatically as the app is used.
 
-3. Copy \`.env.example\` to \`.env\` and add your own values.
-4. Start the app:
+## Environment variables
 
-   \`\`\`bash
-   npm start
-   \`\`\`
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `FIREBASE_SERVICE_ACCOUNT_BASE64` | Yes* | Base64 service-account JSON (recommended) |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | Yes* | Alternative raw JSON |
+| `FIREBASE_STORAGE_BUCKET` | Attachments only | Firebase bucket name |
+| `RESEND_API_KEY` | Yes | Sends registration and login OTPs |
+| `EMAIL_FROM` | Yes | Resend-approved sender |
+| `PORT` | No | Defaults to 3000 |
 
-5. Open \`http://localhost:3000\`.
+*Set exactly one service-account variable.
 
-Never commit \`.env\`. The included \`.gitignore\` keeps it out of Git.
+## Render deployment
 
-## Required environment variables
+- Runtime: Node
+- Build command: `npm install`
+- Start command: `npm start`
+- Add the Firebase and Resend values under **Environment**.
+- Remove old `DATABASE_URL`, `SUPABASE_URL`, and `SUPABASE_SERVICE_KEY` values; they are unused.
 
-| Variable | Purpose |
-| --- | --- |
-| \`DATABASE_URL\` | Supabase PostgreSQL connection string |
-| \`SUPABASE_URL\` | Supabase project URL |
-| \`SUPABASE_SERVICE_ROLE_KEY\` | Server-only key used for Storage uploads |
-| \`SUPABASE_STORAGE_BUCKET\` | Storage bucket name |
-| \`RESEND_API_KEY\` | Resend API key for verification emails |
-| \`EMAIL_FROM\` | Verified sender address |
-| \`PORT\` | Server port; Render supplies this automatically |
+## Firestore layout and privacy
 
-The service-role key must only exist on the server or in Render environment variables. Do not put it in browser code.
+- `users/{email}`: profile and bcrypt password hash
+- `usernames/{lowercaseUsername}`: unique username index
+- `rooms/{roomId}`: type, creator/admin, and private member email array
+- `rooms/{roomId}/messages/{messageId}`: text or attachment messages
 
-## Deploy on Render
-
-- **Runtime:** Node
-- **Build command:** \`npm install\`
-- **Start command:** \`npm start\`
-- Add all values from \`.env.example\` in Render’s Environment settings.
-- Keep your current Supabase database and bucket; this redesign does not require a schema migration.
-- After deployment, confirm registration email, password login, OTP login, DMs, circles, and file uploads.
-
-## Keyboard and mobile behavior
-
-- \`Ctrl/⌘ + K\` focuses username search.
-- \`Enter\` sends a message; \`Shift + Enter\` adds a new line.
-- \`Escape\` closes an open modal or emoji picker.
-- On mobile, opening a conversation switches to a dedicated thread view with a back button.
-
-## Security notes
-
-Sessions and pending OTP codes currently live in server memory. They are cleared whenever the Render service restarts, and multiple Render instances will not share them. For production scale, move sessions and OTP records to a shared store with expiry and add rate limiting to authentication endpoints.
+The server checks membership before returning history, accepting uploads, joining a Socket.IO room, or saving messages. It checks creator ownership before adding or removing circle members.

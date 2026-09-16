@@ -8,7 +8,6 @@ const cors = require("cors");
 const path = require("path");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
-const nodemailer = require("nodemailer");
 const multer = require("multer");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -27,6 +26,10 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "..", "public")));
 
+app.get("/api/config", (_req, res) => {
+    res.json({ attachmentsEnabled: Boolean(process.env.FIREBASE_STORAGE_BUCKET) });
+});
+
 // =========================================
 // In-memory OTP stores (short-lived, fine to lose on restart)
 // =========================================
@@ -42,6 +45,10 @@ function createSession(email) {
     const token = crypto.randomBytes(24).toString("hex");
     sessions.set(token, email);
     return token;
+}
+
+function normalizeEmail(email) {
+    return String(email || "").trim().toLowerCase();
 }
 
 function requireAuth(req, res, next) {
@@ -112,14 +119,15 @@ app.post("/api/check-username", async (req, res) => {
 app.post("/api/register", async (req, res) => {
     try {
         const { name, username, email, password, gender, skills, country, message } = req.body || {};
+        const normalizedEmail = normalizeEmail(email);
         if (!name || !username || !email || !password || !gender || !country || !message) {
             return res.status(400).json({ success: false, message: "Missing required fields." });
         }
-        if (!emailPattern.test(email)) return res.status(400).json({ success: false, message: "Invalid email address." });
+        if (!emailPattern.test(normalizedEmail)) return res.status(400).json({ success: false, message: "Invalid email address." });
         if (!usernamePattern.test(username)) {
             return res.status(400).json({ success: false, message: "Username must be 3-20 characters: letters, numbers, underscores only." });
         }
-        if (await store.getUserByEmail(email)) {
+        if (await store.getUserByEmail(normalizedEmail)) {
             return res.status(409).json({ success: false, message: "An account with this email already exists. Try logging in." });
         }
         if (await store.isUsernameTaken(username)) {
@@ -127,12 +135,12 @@ app.post("/api/register", async (req, res) => {
         }
 
         const otp = generateOtp();
-        otpStore.set(email, {
+        otpStore.set(normalizedEmail, {
             otp, expiresAt: Date.now() + OTP_TTL_MS, attempts: 0,
-            userData: { name, username, email, password, gender, skills, country, message },
+            userData: { name, username, email: normalizedEmail, password, gender, skills, country, message },
         });
 
-        await sendOtpEmail(email, name, otp);
+        await sendOtpEmail(normalizedEmail, name, otp);
         return res.json({ success: true, message: "OTP sent to your email." });
     } catch (err) {
         console.error("register error:", err);
@@ -142,7 +150,7 @@ app.post("/api/register", async (req, res) => {
 
 app.post("/api/resend-otp", async (req, res) => {
     try {
-        const { email } = req.body || {};
+        const email = normalizeEmail(req.body?.email);
         const record = otpStore.get(email);
         if (!record) return res.status(404).json({ success: false, message: "No pending verification for this email. Please register again." });
 
@@ -161,7 +169,8 @@ app.post("/api/resend-otp", async (req, res) => {
 });
 
 app.post("/api/verify-otp", async (req, res) => {
-    const { email, otp } = req.body || {};
+    const email = normalizeEmail(req.body?.email);
+    const { otp } = req.body || {};
     const record = otpStore.get(email);
 
     if (!record) return res.status(404).json({ success: false, message: "No pending verification for this email. Please register again." });
@@ -199,7 +208,8 @@ app.post("/api/verify-otp", async (req, res) => {
 });
 
 app.post("/api/login", async (req, res) => {
-    const { email, password } = req.body || {};
+    const email = normalizeEmail(req.body?.email);
+    const { password } = req.body || {};
     if (!email || !password) return res.status(400).json({ success: false, message: "Email and password are required." });
 
     const user = await store.getUserByEmail(email);
@@ -217,7 +227,7 @@ app.post("/api/login", async (req, res) => {
 
 app.post("/api/login/request-otp", async (req, res) => {
     try {
-        const { email } = req.body || {};
+        const email = normalizeEmail(req.body?.email);
         if (!email) return res.status(400).json({ success: false, message: "Email is required." });
 
         const user = await store.getUserByEmail(email);
@@ -235,7 +245,8 @@ app.post("/api/login/request-otp", async (req, res) => {
 });
 
 app.post("/api/login/verify-otp", async (req, res) => {
-    const { email, otp } = req.body || {};
+    const email = normalizeEmail(req.body?.email);
+    const { otp } = req.body || {};
     const record = loginOtpStore.get(email);
 
     if (!record) return res.status(404).json({ success: false, message: "No pending login code for this email. Request a new one." });
@@ -264,6 +275,12 @@ app.get("/api/me", requireAuth, async (req, res) => {
     const user = await store.getUserByEmail(req.userEmail);
     if (!user) return res.status(404).json({ success: false, message: "User not found." });
     return res.json({ success: true, user: { name: user.name, username: user.username, email: user.email } });
+});
+
+app.post("/api/logout", requireAuth, (req, res) => {
+    const token = req.headers.authorization.slice(7);
+    sessions.delete(token);
+    return res.json({ success: true });
 });
 
 app.get("/api/users/search", requireAuth, async (req, res) => {
@@ -325,11 +342,11 @@ app.post("/api/circles/create", requireAuth, async (req, res) => {
 });
 
 app.post("/api/circles/:id/add-member", requireAuth, async (req, res) => {
-    const roomId = Number(req.params.id);
+    const roomId = req.params.id;
     const room = await store.getRoom(roomId);
     if (!room || room.type !== "circle") return res.status(404).json({ success: false, message: "Circle not found." });
-    if (!(await store.isRoomMember(roomId, req.userEmail))) {
-        return res.status(403).json({ success: false, message: "You're not in this circle." });
+    if (room.created_by !== req.userEmail) {
+        return res.status(403).json({ success: false, message: "Only the circle admin can add members." });
     }
 
     const { username } = req.body || {};
@@ -343,7 +360,7 @@ app.post("/api/circles/:id/add-member", requireAuth, async (req, res) => {
 });
 
 app.get("/api/rooms/:id/messages", requireAuth, async (req, res) => {
-    const roomId = Number(req.params.id);
+    const roomId = req.params.id;
     if (!(await store.isRoomMember(roomId, req.userEmail))) {
         return res.status(403).json({ success: false, message: "Not your room." });
     }
@@ -352,7 +369,7 @@ app.get("/api/rooms/:id/messages", requireAuth, async (req, res) => {
 });
 
 app.get("/api/rooms/:id/members", requireAuth, async (req, res) => {
-    const roomId = Number(req.params.id);
+    const roomId = req.params.id;
     if (!(await store.isRoomMember(roomId, req.userEmail))) {
         return res.status(403).json({ success: false, message: "Not your room." });
     }
@@ -362,13 +379,13 @@ app.get("/api/rooms/:id/members", requireAuth, async (req, res) => {
 });
 
 app.delete("/api/circles/:id/members/:username", requireAuth, async (req, res) => {
-    const roomId = Number(req.params.id);
+    const roomId = req.params.id;
     const room = await store.getRoom(roomId);
     if (!room || room.type !== "circle") {
         return res.status(404).json({ success: false, message: "Circle not found." });
     }
     if (room.created_by !== req.userEmail) {
-        return res.status(403).json({ success: false, message: "Only the circle creator can remove members." });
+        return res.status(403).json({ success: false, message: "Only the circle admin can remove members." });
     }
 
     const user = await store.getUserByUsername(req.params.username);
@@ -380,6 +397,15 @@ app.delete("/api/circles/:id/members/:username", requireAuth, async (req, res) =
     }
 
     await store.removeMemberFromCircle(roomId, user.email);
+    // Remove every live socket for the removed user before future room broadcasts.
+    // Send the removal event directly first so their UI closes the private thread.
+    for (const socketId of emailSockets.get(user.email) || []) {
+        const memberSocket = io.sockets.sockets.get(socketId);
+        if (!memberSocket) continue;
+        memberSocket.emit("member_removed", { roomId, email: user.email, username: user.username });
+        memberSocket.leave(`room:${roomId}`);
+        joinedRooms.get(socketId)?.delete(String(roomId));
+    }
     io.to(`room:${roomId}`).emit("member_removed", {
         roomId,
         email: user.email,
@@ -395,7 +421,7 @@ app.delete("/api/circles/:id/members/:username", requireAuth, async (req, res) =
 
 app.post("/api/rooms/:id/upload", requireAuth, upload.single("file"), async (req, res) => {
     try {
-        const roomId = Number(req.params.id);
+        const roomId = req.params.id;
         if (!(await store.isRoomMember(roomId, req.userEmail))) {
             return res.status(403).json({ success: false, message: "Not your room." });
         }
@@ -422,7 +448,7 @@ app.post("/api/rooms/:id/upload", requireAuth, upload.single("file"), async (req
         return res.json({ success: true, message });
     } catch (err) {
         console.error("upload error:", err);
-        return res.status(500).json({ success: false, message: "Upload failed. Check Supabase storage config." });
+        return res.status(500).json({ success: false, message: "Upload failed. Check Firebase Storage configuration." });
     }
 });
 
@@ -439,7 +465,7 @@ async function emitRoomPresence(roomId) {
         const members = await store.getRoomMembers(roomId);
         const onlineEmails = members.filter((member) => emailSockets.has(member.email)).map((member) => member.email);
         io.to(`room:${roomId}`).emit("presence_update", {
-            roomId: Number(roomId),
+            roomId: String(roomId),
             onlineCount: onlineEmails.length,
             onlineEmails,
         });
@@ -463,7 +489,7 @@ io.on("connection", (socket) => {
         const email = socketEmail.get(socket.id);
         if (!email || !(await store.isRoomMember(roomId, email))) return;
         socket.join(`room:${roomId}`);
-        joinedRooms.get(socket.id)?.add(Number(roomId));
+        joinedRooms.get(socket.id)?.add(String(roomId));
         await emitRoomPresence(roomId);
     });
 
@@ -502,6 +528,6 @@ store.init()
         });
     })
     .catch((err) => {
-        console.error("Failed to initialize database. Check DATABASE_URL in .env:", err.message);
+        console.error("Failed to initialize Firebase. Check your Firebase environment variables:", err.message);
         process.exit(1);
     });

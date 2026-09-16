@@ -1,36 +1,14 @@
-// =========================================
-// STORAGE — Supabase Storage for chat file/image uploads
-// =========================================
+const crypto = require("crypto");
+const { getStorage } = require("firebase-admin/storage");
+const { getFirebaseApp } = require("./firebase");
 
-const { createClient } = require("@supabase/supabase-js");
-
-const BUCKET = "chat-files";
-
-if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
-    console.warn(
-        "\u26A0\uFE0F  SUPABASE_URL / SUPABASE_SERVICE_KEY are not set in .env. " +
-        "File and image uploads in chat won't work until you add them."
-    );
-}
-
-const supabase = createClient(
-    process.env.SUPABASE_URL || "",
-    process.env.SUPABASE_SERVICE_KEY || ""
-);
-
-// Uploads a buffer to the chat-files bucket and returns its public URL.
 async function uploadChatFile({ buffer, originalName, mimeType, roomId }) {
+    if (!process.env.FIREBASE_STORAGE_BUCKET) throw new Error("FIREBASE_STORAGE_BUCKET is not configured.");
+    const bucket = getStorage(getFirebaseApp()).bucket();
     const safeName = originalName.replace(/[^a-zA-Z0-9.\-_]/g, "_");
-    const path = `room-${roomId}/${Date.now()}-${safeName}`;
-
-    const { error } = await supabase.storage
-        .from(BUCKET)
-        .upload(path, buffer, { contentType: mimeType, upsert: false });
-
-    if (error) throw error;
-
-    const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
-    return data.publicUrl;
+    const object = bucket.file(`rooms/${roomId}/${Date.now()}-${safeName}`);
+    const token = crypto.randomUUID();
+    await object.save(buffer, { resumable: false, metadata: { contentType: mimeType, metadata: { firebaseStorageDownloadTokens: token } } });
+    return `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(bucket.name)}/o/${encodeURIComponent(object.name)}?alt=media&token=${token}`;
 }
-
 module.exports = { uploadChatFile };

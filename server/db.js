@@ -1,274 +1,87 @@
-// =========================================
-// DATABASE — Postgres (Supabase) via the `pg` package
-// Replaces the earlier SQLite version. Same shape of functions,
-// now async since network calls are involved.
-// =========================================
+const crypto = require("crypto");
+const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
+const { getFirebaseApp } = require("./firebase");
 
-const { Pool } = require("pg");
-
-if (!process.env.DATABASE_URL) {
-    console.warn(
-        "\u26A0\uFE0F  DATABASE_URL is not set in .env. Copy your Supabase connection string " +
-        "into .env as DATABASE_URL before starting the server."
-    );
+let db;
+const users = () => db.collection("users");
+const rooms = () => db.collection("rooms");
+function clean(value) {
+    if (!value) return value;
+    const result = { ...value };
+    for (const [key, item] of Object.entries(result)) if (item instanceof Timestamp) result[key] = item.toDate().toISOString();
+    return result;
 }
-
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }, // Supabase requires SSL
-});
-
 async function init() {
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS users (
-            email         TEXT PRIMARY KEY,
-            username      TEXT UNIQUE NOT NULL,
-            name          TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            gender        TEXT,
-            skills        TEXT,
-            country       TEXT,
-            message       TEXT,
-            created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-
-        CREATE TABLE IF NOT EXISTS rooms (
-            id            SERIAL PRIMARY KEY,
-            type          TEXT NOT NULL CHECK (type IN ('dm', 'circle')),
-            name          TEXT,
-            created_by    TEXT,
-            created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-
-        CREATE TABLE IF NOT EXISTS room_members (
-            room_id       INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-            email         TEXT NOT NULL REFERENCES users(email) ON DELETE CASCADE,
-            joined_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-            PRIMARY KEY (room_id, email)
-        );
-
-        CREATE TABLE IF NOT EXISTS messages (
-            id            SERIAL PRIMARY KEY,
-            room_id       INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-            sender_email  TEXT NOT NULL,
-            text          TEXT,
-            file_url      TEXT,
-            file_type     TEXT,
-            file_name     TEXT,
-            created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id, created_at);
-        CREATE INDEX IF NOT EXISTS idx_room_members_email ON room_members(email);
-    `);
+    getFirebaseApp();
+    db = getFirestore();
+    await db.collection("_meta").doc("cove").set({ initializedAt: FieldValue.serverTimestamp() }, { merge: true });
 }
-
-// =========================================
-// USERS
-// =========================================
-
 async function createUser({ email, username, name, passwordHash, gender, skills, country, message }) {
-    await pool.query(
-        `INSERT INTO users (email, username, name, password_hash, gender, skills, country, message)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [email, username, name, passwordHash, gender || null, JSON.stringify(skills || []), country || null, message || null]
-    );
+    const normalizedEmail = email.trim().toLowerCase();
+    const usernameLower = username.trim().toLowerCase();
+    await db.runTransaction(async (tx) => {
+        const usernameRef = db.collection("usernames").doc(usernameLower);
+        if ((await tx.get(usernameRef)).exists) throw new Error("USERNAME_TAKEN");
+        tx.create(users().doc(normalizedEmail), { email: normalizedEmail, username: username.trim(), usernameLower, name: name.trim(), password_hash: passwordHash, gender: gender || null, skills: skills || [], country: country || null, message: message || null, created_at: FieldValue.serverTimestamp() });
+        tx.create(usernameRef, { email: normalizedEmail });
+    });
 }
-
 async function getUserByEmail(email) {
-    const { rows } = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-    return rows[0] || null;
+    if (!email) return null;
+    const snap = await users().doc(email.trim().toLowerCase()).get();
+    return snap.exists ? clean(snap.data()) : null;
 }
-
 async function getUserByUsername(username) {
-    const { rows } = await pool.query("SELECT * FROM users WHERE username = $1", [username]);
-    return rows[0] || null;
+    if (!username) return null;
+    const index = await db.collection("usernames").doc(username.trim().toLowerCase()).get();
+    return index.exists ? getUserByEmail(index.data().email) : null;
 }
-
-async function isUsernameTaken(username) {
-    return !!(await getUserByUsername(username));
-}
-
+async function isUsernameTaken(username) { return !!(await getUserByUsername(username)); }
 async function searchUsersByUsername(query, excludeEmail) {
-    const { rows } = await pool.query(
-        `SELECT email, username, name FROM users
-         WHERE username ILIKE $1 AND email != $2
-         ORDER BY username ASC LIMIT 15`,
-        [`%${query}%`, excludeEmail || ""]
-    );
-    return rows;
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const snap = await users().orderBy("usernameLower").startAt(q).endAt(`${q}\uf8ff`).limit(15).get();
+    return snap.docs.map((doc) => clean(doc.data())).filter((u) => u.email !== excludeEmail).map(({ email, username, name }) => ({ email, username, name }));
 }
-
-// =========================================
-// ROOMS (DMs + circles, unified)
-// =========================================
-
+function dmId(a, b) { return `dm_${crypto.createHash("sha256").update([a, b].sort().join("|")).digest("hex").slice(0, 32)}`; }
 async function getOrCreateDmRoom(emailA, emailB) {
-    const existing = await pool.query(
-        `SELECT r.id FROM rooms r
-         JOIN room_members m1 ON m1.room_id = r.id AND m1.email = $1
-         JOIN room_members m2 ON m2.room_id = r.id AND m2.email = $2
-         WHERE r.type = 'dm'
-         LIMIT 1`,
-        [emailA, emailB]
-    );
-    if (existing.rows[0]) return existing.rows[0].id;
-
-    const client = await pool.connect();
-    try {
-        await client.query("BEGIN");
-        const roomRes = await client.query(
-            `INSERT INTO rooms (type, created_by) VALUES ('dm', $1) RETURNING id`,
-            [emailA]
-        );
-        const roomId = roomRes.rows[0].id;
-        await client.query(
-            `INSERT INTO room_members (room_id, email) VALUES ($1, $2), ($1, $3)`,
-            [roomId, emailA, emailB]
-        );
-        await client.query("COMMIT");
-        return roomId;
-    } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
-    } finally {
-        client.release();
-    }
+    const id = dmId(emailA, emailB); const ref = rooms().doc(id);
+    await db.runTransaction(async (tx) => { if (!(await tx.get(ref)).exists) tx.create(ref, { type: "dm", name: null, created_by: emailA, members: [emailA, emailB], created_at: FieldValue.serverTimestamp() }); });
+    return id;
 }
-
 async function createCircle(name, creatorEmail, memberEmails = []) {
-    const client = await pool.connect();
-    try {
-        await client.query("BEGIN");
-        const roomRes = await client.query(
-            `INSERT INTO rooms (type, name, created_by) VALUES ('circle', $1, $2) RETURNING id`,
-            [name, creatorEmail]
-        );
-        const roomId = roomRes.rows[0].id;
-
-        const allMembers = Array.from(new Set([creatorEmail, ...memberEmails]));
-        const values = allMembers.map((_, i) => `($1, $${i + 2})`).join(", ");
-        await client.query(
-            `INSERT INTO room_members (room_id, email) VALUES ${values} ON CONFLICT DO NOTHING`,
-            [roomId, ...allMembers]
-        );
-        await client.query("COMMIT");
-        return roomId;
-    } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
-    } finally {
-        client.release();
-    }
+    const ref = rooms().doc();
+    await ref.set({ type: "circle", name, created_by: creatorEmail, members: Array.from(new Set([creatorEmail, ...memberEmails])), created_at: FieldValue.serverTimestamp() });
+    return ref.id;
 }
-
-async function addMemberToCircle(roomId, email) {
-    await pool.query(
-        `INSERT INTO room_members (room_id, email) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-        [roomId, email]
-    );
-}
-
-async function removeMemberFromCircle(roomId, email) {
-    await pool.query(
-        "DELETE FROM room_members WHERE room_id = $1 AND email = $2",
-        [roomId, email]
-    );
-}
-
-async function getRoom(roomId) {
-    const { rows } = await pool.query("SELECT * FROM rooms WHERE id = $1", [roomId]);
-    return rows[0] || null;
-}
-
-async function isRoomMember(roomId, email) {
-    const { rows } = await pool.query(
-        "SELECT 1 FROM room_members WHERE room_id = $1 AND email = $2",
-        [roomId, email]
-    );
-    return rows.length > 0;
-}
-
+async function addMemberToCircle(roomId, email) { await rooms().doc(String(roomId)).update({ members: FieldValue.arrayUnion(email) }); }
+async function removeMemberFromCircle(roomId, email) { await rooms().doc(String(roomId)).update({ members: FieldValue.arrayRemove(email) }); }
+async function getRoom(roomId) { const snap = await rooms().doc(String(roomId)).get(); return snap.exists ? { id: snap.id, ...clean(snap.data()) } : null; }
+async function isRoomMember(roomId, email) { const room = await getRoom(roomId); return !!room?.members?.includes(email); }
 async function getRoomMembers(roomId) {
-    const { rows } = await pool.query(
-        `SELECT u.email, u.username, u.name FROM room_members rm
-         JOIN users u ON u.email = rm.email
-         WHERE rm.room_id = $1`,
-        [roomId]
-    );
-    return rows;
+    const room = await getRoom(roomId); if (!room) return [];
+    const snapshots = await Promise.all((room.members || []).map((email) => users().doc(email).get()));
+    return snapshots.filter((snap) => snap.exists).map((snap) => { const { email, username, name } = snap.data(); return { email, username, name }; });
 }
-
 async function listRoomsForUser(email) {
-    const { rows } = await pool.query(
-        `SELECT
-            r.id, r.type, r.name,
-            (SELECT text FROM messages WHERE room_id = r.id ORDER BY created_at DESC LIMIT 1) AS last_text,
-            (SELECT file_name FROM messages WHERE room_id = r.id ORDER BY created_at DESC LIMIT 1) AS last_file_name,
-            (SELECT created_at FROM messages WHERE room_id = r.id ORDER BY created_at DESC LIMIT 1) AS last_at,
-            (SELECT COUNT(*) FROM room_members WHERE room_id = r.id) AS member_count
-         FROM rooms r
-         JOIN room_members rm ON rm.room_id = r.id
-         WHERE rm.email = $1
-         ORDER BY last_at DESC NULLS LAST`,
-        [email]
-    );
-
-    const results = [];
-    for (const r of rows) {
-        if (r.type === "dm") {
-            const others = await pool.query(
-                `SELECT u.email, u.username, u.name FROM room_members rm
-                 JOIN users u ON u.email = rm.email
-                 WHERE rm.room_id = $1 AND rm.email != $2 LIMIT 1`,
-                [r.id, email]
-            );
-            results.push({ ...r, otherUser: others.rows[0] || null });
-        } else {
-            results.push({ ...r });
-        }
-    }
-    return results;
+    const snap = await rooms().where("members", "array-contains", email).get();
+    const results = await Promise.all(snap.docs.map(async (doc) => {
+        const data = clean(doc.data());
+        const latest = await doc.ref.collection("messages").orderBy("created_at", "desc").limit(1).get();
+        const last = latest.empty ? null : clean(latest.docs[0].data());
+        const room = { id: doc.id, ...data, member_count: data.members?.length || 0, last_text: last?.text || null, last_file_name: last?.file_name || null, last_message_at: last?.created_at || null };
+        if (data.type === "dm") { const other = await getUserByEmail(data.members.find((m) => m !== email)); room.otherUser = other ? { email: other.email, username: other.username, name: other.name } : null; }
+        delete room.members; return room;
+    }));
+    return results.sort((a, b) => new Date(b.last_message_at || b.created_at || 0) - new Date(a.last_message_at || a.created_at || 0));
 }
-
-// =========================================
-// MESSAGES
-// =========================================
-
 async function saveMessage({ roomId, senderEmail, text, fileUrl, fileType, fileName }) {
-    const { rows } = await pool.query(
-        `INSERT INTO messages (room_id, sender_email, text, file_url, file_type, file_name)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING *`,
-        [roomId, senderEmail, text || null, fileUrl || null, fileType || null, fileName || null]
-    );
-    return rows[0];
+    const ref = rooms().doc(String(roomId)).collection("messages").doc();
+    await ref.set({ room_id: String(roomId), sender_email: senderEmail, text: text || null, file_url: fileUrl || null, file_type: fileType || null, file_name: fileName || null, created_at: FieldValue.serverTimestamp() });
+    return { id: ref.id, ...clean((await ref.get()).data()) };
 }
-
 async function getMessages(roomId, limit = 200) {
-    const { rows } = await pool.query(
-        `SELECT * FROM messages WHERE room_id = $1 ORDER BY created_at ASC LIMIT $2`,
-        [roomId, limit]
-    );
-    return rows;
+    const snap = await rooms().doc(String(roomId)).collection("messages").orderBy("created_at", "asc").limit(limit).get();
+    return snap.docs.map((doc) => ({ id: doc.id, ...clean(doc.data()) }));
 }
-
-module.exports = {
-    pool,
-    init,
-    createUser,
-    getUserByEmail,
-    getUserByUsername,
-    isUsernameTaken,
-    searchUsersByUsername,
-    getOrCreateDmRoom,
-    createCircle,
-    addMemberToCircle,
-    removeMemberFromCircle,
-    getRoom,
-    isRoomMember,
-    getRoomMembers,
-    listRoomsForUser,
-    saveMessage,
-    getMessages,
-};
+module.exports = { init, createUser, getUserByEmail, getUserByUsername, isUsernameTaken, searchUsersByUsername, getOrCreateDmRoom, createCircle, addMemberToCircle, removeMemberFromCircle, getRoom, isRoomMember, getRoomMembers, listRoomsForUser, saveMessage, getMessages };

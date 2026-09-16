@@ -98,6 +98,11 @@ const EMOJI_SET = [
 
 async function init() {
     try {
+        const config = await fetch(`${API_BASE}/api/config`).then((response) => response.json()).catch(() => ({}));
+        if (!config.attachmentsEnabled) {
+            attachBtn.hidden = true;
+            fileInput.disabled = true;
+        }
         const res = await fetch(`${API_BASE}/api/me`, { headers: authHeaders });
         const data = await res.json();
         if (!res.ok || !data.success) {
@@ -122,7 +127,7 @@ function connectSocket() {
     socket.on("connect", () => socket.emit("auth", token));
 
     socket.on("new_message", (msg) => {
-        if (msg.room_id === activeRoomId) {
+        if (String(msg.room_id) === String(activeRoomId)) {
             appendMessage(msg);
             scrollMessagesToBottom();
         }
@@ -130,14 +135,14 @@ function connectSocket() {
     });
 
     socket.on("member_added", ({ roomId }) => {
-        if (roomId === activeRoomId) {
+        if (String(roomId) === String(activeRoomId)) {
             loadRooms();
             if (!membersModalOverlay.hidden) loadMembers();
         }
     });
 
     socket.on("member_removed", ({ roomId, email, username }) => {
-        if (Number(roomId) !== Number(activeRoomId)) {
+        if (String(roomId) !== String(activeRoomId)) {
             loadRooms();
             return;
         }
@@ -156,7 +161,7 @@ function connectSocket() {
     });
 
     socket.on("presence_update", ({ roomId, onlineCount: count, onlineEmails = [] }) => {
-        if (Number(roomId) !== Number(activeRoomId)) return;
+        if (String(roomId) !== String(activeRoomId)) return;
         currentOnlineEmails = new Set(onlineEmails);
         const label = onlineCount.querySelector("b");
         label.textContent = activeRoom?.type === "circle"
@@ -192,7 +197,7 @@ async function loadRooms() {
             const stamp = r.last_message_at ? formatRoomTime(r.last_message_at) : "";
 
             const item = document.createElement("div");
-            item.className = "convo-item" + (r.id === activeRoomId ? " active" : "");
+            item.className = "convo-item" + (String(r.id) === String(activeRoomId) ? " active" : "");
             item.innerHTML = `
                 <span class="convo-avatar">${r.type === "circle" ? "◎" : initials(displayName)}</span>
                 <span class="convo-content"><span class="convo-item-name">${escapeHtml(displayName)}</span><span class="convo-item-preview">${escapeHtml(preview)}</span></span>
@@ -395,8 +400,9 @@ async function openRoom(room) {
         threadName.textContent = room.name;
         threadUsername.textContent = `${room.member_count || ""} member circle`.trim();
         threadAvatar.textContent = "◎";
-        addMemberBtn.hidden = false;
+        addMemberBtn.hidden = true;
         membersBtn.hidden = false;
+        loadMembers();
     } else {
         threadName.textContent = room.otherUser?.name || room.otherUser?.username || "";
         threadUsername.textContent = room.otherUser ? `@${room.otherUser.username}` : "";
@@ -593,7 +599,8 @@ emojiBtn.addEventListener("click", (e) => {
 // LOGOUT
 // =========================================
 
-logoutBtn.addEventListener("click", () => {
+logoutBtn.addEventListener("click", async () => {
+    try { await fetch(`${API_BASE}/api/logout`, { method: "POST", headers: authHeaders }); } catch (err) { console.error(err); }
     localStorage.removeItem("coveToken");
     localStorage.removeItem("coveUser");
     window.location.href = "index.html";
@@ -637,6 +644,7 @@ async function loadMembers() {
         const data = await res.json();
         if (!data.success) return;
         activeRoomIsOwner = !!data.isOwner;
+        addMemberBtn.hidden = activeRoom?.type !== "circle" || !activeRoomIsOwner;
 
         membersList.innerHTML = "";
         data.members.forEach((m) => {
@@ -646,7 +654,7 @@ async function loadMembers() {
             const isMe = m.email === me.email;
             const isOnline = currentOnlineEmails.has(m.email);
             row.innerHTML = `
-                <span class="member-row-name">${escapeHtml(m.name)} ${isMe ? '<span class="member-row-you">(you)</span>' : ""}</span>
+                <span class="member-row-name">${escapeHtml(m.name)} ${isMe ? '<span class="member-row-you">(you)</span>' : ""} ${activeRoom?.created_by === m.email ? '<span class="member-row-admin">Admin</span>' : ""}</span>
                 <span class="member-row-username">@${escapeHtml(m.username)} <i class="member-presence ${isOnline ? "online" : ""}">${isOnline ? "Online" : "Offline"}</i></span>
                 ${activeRoomIsOwner && !isMe ? `<button class="remove-member-btn" type="button" data-username="${escapeHtml(m.username)}">Remove</button>` : ""}
             `;
