@@ -98,6 +98,7 @@ const EMOJI_SET = [
 
 async function init() {
     try {
+        enhanceWelcomeState();
         const config = await fetch(`${API_BASE}/api/config`).then((response) => response.json()).catch(() => ({}));
         if (!config.attachmentsEnabled) {
             attachBtn.hidden = true;
@@ -120,6 +121,36 @@ async function init() {
     } catch (err) {
         console.error(err);
     }
+}
+
+function enhanceWelcomeState() {
+    if (!threadEmpty || threadEmpty.querySelector(".welcome-board")) return;
+    threadEmpty.insertAdjacentHTML("beforeend", `
+        <aside class="welcome-board" aria-label="Getting started">
+            <div class="welcome-board-top">
+                <span class="welcome-status"><i></i> Your private space is ready</span>
+                <span class="welcome-number">01</span>
+            </div>
+            <button class="welcome-action welcome-action-primary" type="button" id="emptyFindBtn">
+                <span class="welcome-action-icon">⌕</span>
+                <span><b>Find your people</b><small>Search by username and start a private chat.</small></span>
+                <i>↗</i>
+            </button>
+            <button class="welcome-action" type="button" id="emptyCircleShortcut">
+                <span class="welcome-action-icon">◎</span>
+                <span><b>Build a circle</b><small>Create an invite-only home for your group.</small></span>
+                <i>↗</i>
+            </button>
+            <div class="welcome-trust">
+                <span>⌑</span>
+                <p><b>Private by default</b><small>Only invited members can read or join a circle.</small></p>
+            </div>
+        </aside>`);
+    document.getElementById("emptyFindBtn")?.addEventListener("click", () => {
+        searchInput.focus();
+        searchInput.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    document.getElementById("emptyCircleShortcut")?.addEventListener("click", openCircleModal);
 }
 
 function connectSocket() {
