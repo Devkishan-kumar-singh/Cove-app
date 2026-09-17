@@ -89,6 +89,8 @@ let activeCallRoomId = null;
 let callMuted = false;
 const callPeers = new Map();
 const knownCallStates = new Map();
+const pendingIceCandidates = new Map();
+let runtimeConfig = {};
 
 const EMOJI_SET = [
     "😀","😁","😂","🤣","😊","😍","😘","😎","🤔","😅",
@@ -104,8 +106,8 @@ const EMOJI_SET = [
 async function init() {
     try {
         enhanceWelcomeState();
-        const config = await fetch(`${API_BASE}/api/config`).then((response) => response.json()).catch(() => ({}));
-        if (!config.attachmentsEnabled) {
+        runtimeConfig = await fetch(`${API_BASE}/api/config`).then((response) => response.json()).catch(() => ({}));
+        if (!runtimeConfig.attachmentsEnabled) {
             attachBtn.hidden = true;
             fileInput.disabled = true;
         }
@@ -487,24 +489,38 @@ async function openRoom(room) {
 // PRIVATE VOICE CALLS — WebRTC mesh + Socket.IO signalling
 // =========================================
 
+function callIcon(name) {
+    const icons = {
+        phone: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.2 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.33 1.78.62 2.62a2 2 0 0 1-.45 2.11L8 9.73a16 16 0 0 0 6 6l1.28-1.28a2 2 0 0 1 2.11-.45c.84.29 1.72.5 2.62.62A2 2 0 0 1 22 16.9z"/></svg>',
+        mic: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg>',
+        micOff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m2 2 20 20M9 9v1a3 3 0 0 0 5.12 2.12M15 9.3V5a3 3 0 0 0-5.6-1.5M17 16.9A7 7 0 0 0 19 10M5 10a7 7 0 0 0 10.7 5.9M12 17v5M8 22h8"/></svg>',
+        volume: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4V5zM15.5 8.5a5 5 0 0 1 0 7M18 6a8.5 8.5 0 0 1 0 12"/></svg>',
+        close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m18 6-12 12M6 6l12 12"/></svg>',
+    };
+    return icons[name] || "";
+}
+
 function installVoiceCallUi() {
     if (document.getElementById("voiceCallBtn")) return;
     const button = document.createElement("button");
     button.id = "voiceCallBtn";
     button.className = "voice-call-btn";
     button.type = "button";
-    button.innerHTML = `<span class="voice-call-icon">◖</span><b>Voice call</b><i hidden></i>`;
+    button.innerHTML = `<span class="voice-call-icon">${callIcon("phone")}</span><b>Voice call</b><i hidden></i>`;
+    button.setAttribute("aria-label", "Start voice call");
     button.addEventListener("click", () => activeCallRoomId ? endVoiceCall() : startVoiceCall());
     onlineCount.insertAdjacentElement("afterend", button);
 
     document.body.insertAdjacentHTML("beforeend", `
         <section class="voice-dock" id="voiceDock" hidden aria-live="polite">
-            <div class="voice-dock-pulse"><span></span><span></span><b>◖</b></div>
+            <div class="voice-dock-pulse"><span></span><span></span><b>${callIcon("phone")}</b></div>
             <div class="voice-dock-copy"><small>VOICE ROOM</small><strong id="voiceDockName">Conversation</strong><span id="voiceDockStatus">Connecting…</span></div>
             <div class="voice-people" id="voicePeople"></div>
-            <button type="button" class="voice-control" id="voiceMuteBtn" title="Mute microphone">♩</button>
-            <button type="button" class="voice-control voice-end" id="voiceEndBtn" title="Leave call">×</button>
+            <button type="button" class="voice-control voice-audio" id="voiceAudioBtn" title="Play call audio" aria-label="Play call audio">${callIcon("volume")}</button>
+            <button type="button" class="voice-control" id="voiceMuteBtn" title="Mute microphone" aria-label="Mute microphone">${callIcon("mic")}</button>
+            <button type="button" class="voice-control voice-end" id="voiceEndBtn" title="Leave call" aria-label="Leave call">${callIcon("close")}</button>
         </section>`);
+    document.getElementById("voiceAudioBtn").addEventListener("click", resumeCallAudio);
     document.getElementById("voiceMuteBtn").addEventListener("click", toggleCallMute);
     document.getElementById("voiceEndBtn").addEventListener("click", endVoiceCall);
 }
@@ -513,7 +529,13 @@ async function startVoiceCall() {
     if (!activeRoomId || !socket) return;
     if (!navigator.mediaDevices?.getUserMedia) return showToast("Voice calls are not supported in this browser.", "error");
     try {
-        localCallStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
+        localCallStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+            video: false,
+        });
+        const microphone = localCallStream.getAudioTracks()[0];
+        if (!microphone) throw new Error("No microphone track was created.");
+        microphone.enabled = true;
         activeCallRoomId = String(activeRoomId);
         callMuted = false;
         const dock = document.getElementById("voiceDock");
@@ -529,18 +551,45 @@ async function startVoiceCall() {
 
 function createPeerConnection(peerId) {
     if (callPeers.has(peerId)) return callPeers.get(peerId);
-    const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }, { urls: "stun:stun1.l.google.com:19302" }] });
+    const peer = new RTCPeerConnection({
+        iceServers: runtimeConfig.iceServers?.length ? runtimeConfig.iceServers : [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }],
+        iceCandidatePoolSize: 10,
+    });
     localCallStream?.getTracks().forEach((track) => peer.addTrack(track, localCallStream));
     peer.onicecandidate = ({ candidate }) => {
         if (candidate) socket.emit("call_signal", { to: peerId, roomId: activeCallRoomId, signal: { candidate } });
     };
-    peer.ontrack = ({ streams }) => {
+    peer.ontrack = ({ track, streams }) => {
         let audio = document.getElementById(`call-audio-${peerId}`);
-        if (!audio) { audio = document.createElement("audio"); audio.id = `call-audio-${peerId}`; audio.autoplay = true; audio.playsInline = true; document.body.appendChild(audio); }
-        audio.srcObject = streams[0];
+        if (!audio) {
+            audio = document.createElement("audio");
+            audio.id = `call-audio-${peerId}`;
+            audio.autoplay = true;
+            audio.playsInline = true;
+            audio.volume = 1;
+            document.body.appendChild(audio);
+        }
+        audio.srcObject = streams[0] || new MediaStream([track]);
+        audio.muted = false;
+        audio.play().then(markCallAudioPlaying).catch(markCallAudioBlocked);
+    };
+    peer.oniceconnectionstatechange = () => {
+        const status = document.getElementById("voiceDockStatus");
+        if (!status) return;
+        if (["checking", "new"].includes(peer.iceConnectionState)) status.textContent = "Connecting audio…";
+        if (["connected", "completed"].includes(peer.iceConnectionState)) status.textContent = "Audio connected";
+        if (peer.iceConnectionState === "failed") status.textContent = "Network blocked audio — TURN relay required";
     };
     peer.onconnectionstatechange = () => {
-        if (["failed", "closed", "disconnected"].includes(peer.connectionState)) removeCallPeer(peerId);
+        if (["failed", "closed"].includes(peer.connectionState)) removeCallPeer(peerId);
+        if (peer.connectionState === "disconnected") {
+            const status = document.getElementById("voiceDockStatus");
+            if (status) status.textContent = "Reconnecting audio…";
+            window.setTimeout(() => {
+                const currentPeer = callPeers.get(peerId);
+                if (currentPeer?.connectionState === "disconnected") removeCallPeer(peerId);
+            }, 12000);
+        }
     };
     callPeers.set(peerId, peer);
     return peer;
@@ -562,18 +611,28 @@ async function handleCallSignal({ roomId, from, signal }) {
         const peer = await createCallPeer(from);
         if (signal.description) {
             await peer.setRemoteDescription(signal.description);
+            const queued = pendingIceCandidates.get(from) || [];
+            for (const candidate of queued) await peer.addIceCandidate(candidate);
+            pendingIceCandidates.delete(from);
             if (signal.description.type === "offer") {
                 const answer = await peer.createAnswer();
                 await peer.setLocalDescription(answer);
                 socket.emit("call_signal", { to: from, roomId: activeCallRoomId, signal: { description: peer.localDescription } });
             }
-        } else if (signal.candidate) await peer.addIceCandidate(signal.candidate);
+        } else if (signal.candidate) {
+            if (peer.remoteDescription) await peer.addIceCandidate(signal.candidate);
+            else {
+                if (!pendingIceCandidates.has(from)) pendingIceCandidates.set(from, []);
+                pendingIceCandidates.get(from).push(signal.candidate);
+            }
+        }
     } catch (error) { console.error("Voice call signal error:", error); }
 }
 
 function removeCallPeer(peerId) {
     callPeers.get(peerId)?.close();
     callPeers.delete(peerId);
+    pendingIceCandidates.delete(peerId);
     document.getElementById(`call-audio-${peerId}`)?.remove();
 }
 
@@ -582,8 +641,31 @@ function toggleCallMute() {
     localCallStream?.getAudioTracks().forEach((track) => { track.enabled = !callMuted; });
     const button = document.getElementById("voiceMuteBtn");
     button.classList.toggle("muted", callMuted);
-    button.textContent = callMuted ? "M" : "♩";
+    button.innerHTML = callIcon(callMuted ? "micOff" : "mic");
     button.title = callMuted ? "Unmute microphone" : "Mute microphone";
+    button.setAttribute("aria-label", button.title);
+}
+
+function markCallAudioBlocked() {
+    const button = document.getElementById("voiceAudioBtn");
+    button?.classList.add("needs-tap");
+    const status = document.getElementById("voiceDockStatus");
+    if (status) status.textContent = "Tap the speaker button to hear audio";
+}
+
+function markCallAudioPlaying() {
+    document.getElementById("voiceAudioBtn")?.classList.remove("needs-tap");
+}
+
+async function resumeCallAudio() {
+    const audioElements = Array.from(document.querySelectorAll('audio[id^="call-audio-"]'));
+    if (!audioElements.length) return showToast("Waiting for another person to connect.");
+    const results = await Promise.allSettled(audioElements.map((audio) => audio.play()));
+    if (results.some((result) => result.status === "fulfilled")) {
+        markCallAudioPlaying();
+        const status = document.getElementById("voiceDockStatus");
+        if (status) status.textContent = "Audio connected";
+    } else showToast("Your browser is still blocking call audio.", "error");
 }
 
 function endVoiceCall() {
@@ -593,6 +675,15 @@ function endVoiceCall() {
     localCallStream = null;
     activeCallRoomId = null;
     callMuted = false;
+    pendingIceCandidates.clear();
+    const muteButton = document.getElementById("voiceMuteBtn");
+    if (muteButton) {
+        muteButton.classList.remove("muted");
+        muteButton.innerHTML = callIcon("mic");
+        muteButton.title = "Mute microphone";
+        muteButton.setAttribute("aria-label", "Mute microphone");
+    }
+    document.getElementById("voiceAudioBtn")?.classList.remove("needs-tap");
     const dock = document.getElementById("voiceDock");
     if (dock) dock.hidden = true;
     updateCallButton();

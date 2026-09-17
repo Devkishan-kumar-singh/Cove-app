@@ -58,6 +58,9 @@ Open `http://localhost:3000`. Firestore collections are created automatically as
 | `FIREBASE_STORAGE_BUCKET` | Attachments only | Firebase bucket name |
 | `RESEND_API_KEY` | Yes | Sends registration and login OTPs |
 | `EMAIL_FROM` | Yes | Resend-approved sender |
+| `TURN_URL` | Mobile calls | Comma-separated TURN/TURNS relay URLs |
+| `TURN_USERNAME` | Mobile calls | TURN relay username |
+| `TURN_CREDENTIAL` | Mobile calls | TURN relay password/credential |
 | `PORT` | No | Defaults to 3000 |
 
 *Set exactly one service-account variable.
@@ -67,7 +70,7 @@ Open `http://localhost:3000`. Firestore collections are created automatically as
 - Runtime: Node
 - Build command: `npm install`
 - Start command: `npm start`
-- Add the Firebase and Resend values under **Environment**.
+- Add the Firebase, Resend, and TURN values under **Environment**.
 - Remove old `DATABASE_URL`, `SUPABASE_URL`, and `SUPABASE_SERVICE_KEY` values; they are unused.
 
 ## Firestore layout and privacy
@@ -79,4 +82,4 @@ Open `http://localhost:3000`. Firestore collections are created automatically as
 
 The server checks membership before returning history, accepting uploads, joining a Socket.IO room, or saving messages. It checks creator ownership before adding or removing circle members.
 
-Voice calls use Socket.IO only for membership-checked signalling; audio travels peer-to-peer through WebRTC. Calls require HTTPS in production (Render supplies this) and microphone permission. The included public STUN servers work for most networks. Some restrictive corporate or carrier networks require a TURN relay for guaranteed connectivity. Background browser tabs can remain in a call, but a sleeping computer suspends its microphone and network connection.
+Voice calls use Socket.IO only for membership-checked signalling; audio travels peer-to-peer through WebRTC. Calls require HTTPS in production (Render supplies this) and microphone permission. Public STUN servers remain as the fallback, but a TURN relay is strongly recommended for phones and carrier networks. Put every relay endpoint in `TURN_URL`, separated by commas, for example `turn:host:80,turn:host:80?transport=tcp,turn:host:443,turns:host:443?transport=tcp`. Background browser tabs can remain in a call, but a sleeping computer suspends its microphone and network connection.

@@ -27,7 +27,17 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 app.get("/api/config", (_req, res) => {
-    res.json({ attachmentsEnabled: Boolean(process.env.FIREBASE_STORAGE_BUCKET) });
+    const iceServers = [
+        { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+    ];
+    if (process.env.TURN_URL && process.env.TURN_USERNAME && process.env.TURN_CREDENTIAL) {
+        iceServers.push({
+            urls: process.env.TURN_URL.split(",").map((value) => value.trim()).filter(Boolean),
+            username: process.env.TURN_USERNAME,
+            credential: process.env.TURN_CREDENTIAL,
+        });
+    }
+    res.json({ attachmentsEnabled: Boolean(process.env.FIREBASE_STORAGE_BUCKET), iceServers });
 });
 
 // =========================================
